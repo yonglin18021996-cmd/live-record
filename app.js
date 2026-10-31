@@ -210,16 +210,14 @@ async function pump() {
   setDot(recording ? 'live' : 'busy');
   const job = queue[0];
 
-  const spk = await speakerOf(job.pcm);
-  const ui = makeItem(job.t, spk);
-  if (spk.low) ui.chip.classList.add('low');
+  const ui = makeItem(job.t, { id: '?', name: '?' });
 
   try {
     const hint = b64utf8(items.slice(-2).map((i) => i.zh).join(' ').slice(0, 300));
     const ctxStr = items.slice(-3).map((i) => `${i.zh}\n→ ${i.vi}`).join('\n');
     const b64 = b64of(encodeWavBytes(job.pcm, TARGET_SR));
 
-    const r = await gasPost('chunk', { b64, hint, ctx: ctxStr, speaker: spk.id }, { timeout: 90000 });
+    const r = await gasPost('chunk', { b64, hint, ctx: ctxStr, speaker: null }, { timeout: 90000 });
     const zh = String(r.zh || '').trim();
     if (!zh) { ui.el.remove(); throw Object.assign(new Error(''), { silent: true }); }
 
@@ -227,6 +225,15 @@ async function pump() {
     const vi = String(r.vi || '').trim();
     ui.vi.classList.remove('live');
     ui.vi.textContent = vi;
+
+    // Chỉ chạy tách người nói khi transcript đủ dài — chunk cụt vài chữ làm bẩn centroid,
+    // sinh ra cụm rác (V3, V4…) cho cùng một người.
+    let spk = { id: '?', name: '?' };
+    if (zh.length >= 8) {
+      spk = await speakerOf(job.pcm);
+      ui.chip.textContent = spk.name || spk.id;
+      ui.chip.className = 'spk ' + SPK_CLASS(spk.id) + (spk.low ? ' low' : '');
+    }
 
     const it = { t: job.t, zh, vi, zone: spk.id === '?' ? null : spk.id, spk: spk.id, spkName: spk.name };
     items.push(it);
