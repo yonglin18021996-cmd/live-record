@@ -22,6 +22,7 @@
   const DEFAULTS = {
     accept: 0.80,     // cosine tối thiểu để nhận là cùng người
     delta: 0.05,      // phải hơn runner-up chừng này
+    softDelta: 0.05,  // ngưỡng mềm: cụm còn ít mẫu thì dễ nhận hơn (tránh tạo cụm rác)
     maxSpeakers: 6,
     emaCap: 200,      // chặn để centroid không đông cứng sau hội thoại dài
     minRmsDb: -55,    // chunk im lặng hơn mức này thì bỏ
@@ -106,6 +107,21 @@
           s1: Number(s1.toFixed(3)),
           s2: Number(s2 < -8 ? -1 : s2.toFixed(3)),
           isNew: false,
+        };
+      }
+
+      // Ngưỡng mềm: cụm còn ít mẫu (<3) thì dễ nhận hơn. Chunk ngắn bị cắt giữa câu
+      // thường cho cosine thấp hơn 0.05-0.08 so với chunk đầy đủ, tạo cụm rác nếu quá chặt.
+      const soft = i1 >= 0 && s1 >= o.accept - o.softDelta && centroids[i1].count < 3 && !centroids[i1].reused;
+      if (soft) {
+        update(centroids[i1], emb);
+        return {
+          speaker: centroids[i1].id,
+          conf: Number(s1.toFixed(3)),
+          s1: Number(s1.toFixed(3)),
+          s2: Number(s2 < -8 ? -1 : s2.toFixed(3)),
+          isNew: false,
+          lowconf: true,
         };
       }
 
