@@ -167,6 +167,10 @@ $('btnSpkSave').addEventListener('click', () => {
   }
   $('spkSheet').classList.remove('on');
   syncSpeakers();
+  // tên Latin vừa đặt cũng vào bảng tên để lần sau dịch giữ nguyên, không Hán-Việt hóa
+  if (name && /^[A-Za-z][A-Za-z .'-]{1,20}$/.test(name)) {
+    gasPost('names.put', { names: [{ alias: name, display: name }] }, { timeout: 20000 }).catch(() => {});
+  }
 });
 
 /* ---------- ghi âm ---------- */
@@ -375,6 +379,10 @@ async function buildFinal() {
     const r = await gasPost('final', { items: items.map((i) => ({ zh: i.zh })) }, { timeout: 180000 });
     finalText = r.text || '';
     showPanel(finalText);
+    // tự học tên riêng cho các buổi sau (không chặn UI)
+    if (finalText.length > 40) {
+      gasPost('names.extract', { text: finalText }, { timeout: 60000 }).catch(() => {});
+    }
   } catch (e) {
     msg('Lỗi bản chuẩn: ' + e.message, 6000);
     listEl.style.display = '';
