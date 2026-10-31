@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0b0d10" />
+<title>Ghi âm · Dịch</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icon-180.png" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#12151a; --line:#21262d; --txt:#e8eaed;
+    --dim:#8b939e; --zh:#6f7783; --red:#e5484d; --ok:#2ea043; --warn:#d29922;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--txt);
+    font:400 15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column; overscroll-behavior:none;
+  }
+
+  /* ---------- header ---------- */
+  header{
+    position:sticky; top:0; z-index:5; background:rgba(11,13,16,.92);
+    backdrop-filter:saturate(180%) blur(12px);
+    border-bottom:1px solid var(--line);
+    padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    display:flex; align-items:center; gap:9px;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:0 0 auto}
+  .dot.live{background:var(--red);animation:p 1.4s infinite}
+  .dot.busy{background:var(--warn)}
+  @keyframes p{0%,100%{opacity:1}50%{opacity:.25}}
+  #clock{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600;letter-spacing:.2px}
+  #queue{font-size:12px;color:var(--dim)}
+  #gas{
+    margin-left:auto;font-size:11px;color:var(--dim);border:1px solid var(--line);
+    border-radius:20px;padding:3px 8px;display:flex;align-items:center;gap:5px;
+  }
+  #gas::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--dim)}
+  #gas.ok::before{background:var(--ok)}
+  #gas.slow::before{background:var(--warn)}
+  #gas.err::before{background:var(--red)}
+  #toggleZh{
+    background:transparent;border:1px solid var(--line);color:var(--dim);
+    border-radius:8px;padding:5px 9px;font-size:12px;font-family:inherit;
+  }
+  #toggleZh.on{color:var(--txt);border-color:#3a424d}
+
+  /* ---------- list ---------- */
+  #list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 0 190px}
+  .it{padding:9px 14px;border-bottom:1px solid #161a20}
+  .head{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+  .spk{
+    font-size:10px;font-weight:600;letter-spacing:.4px;padding:1px 6px;border-radius:5px;
+    background:#1d222a;color:#9aa4b2;cursor:pointer;
+  }
+  .spk.v1{background:#1e2a3a;color:#7fb0ff}
+  .spk.v2{background:#2a1e33;color:#c78bff}
+  .spk.v3{background:#1e2f26;color:#6fd39a}
+  .spk.v4{background:#332a1a;color:#e5b567}
+  .spk.v5{background:#301e1e;color:#f08a8a}
+  .spk.v6{background:#1a2f30;color:#5fc9cf}
+  .spk.low{opacity:.55}
+  .tm{font-size:11px;color:#4b535e;font-variant-numeric:tabular-nums}
+  .zh{color:var(--zh);font-size:13.5px;margin-bottom:4px;word-break:break-word}
+  .vi{color:var(--txt);font-size:15.5px;word-break:break-word}
+  .vi.live::after{content:"▍";color:var(--dim);animation:p 1s infinite}
+  .err{color:#ff8a8a;font-size:13px}
+  body.vi-only .zh{display:none}
+
+  #final{flex:1;overflow-y:auto;padding:14px 14px 190px;display:none;white-space:pre-wrap;font-size:15px;line-height:1.65}
+  #final.on{display:block}
+
+  /* ---------- footer phụ ---------- */
+  footer{
+    position:sticky;bottom:0;background:rgba(11,13,16,.95);
+    backdrop-filter:saturate(180%) blur(12px);border-top:1px solid var(--line);
+    padding:9px 14px calc(env(safe-area-inset-bottom) + 112px);
+    display:flex;align-items:center;gap:8px;
+  }
+  .btn{
+    background:var(--panel);border:1px solid var(--line);color:var(--txt);
+    border-radius:10px;padding:9px 12px;font-size:13px;font-family:inherit;font-weight:500;
+  }
+  .btn:disabled{opacity:.35}
+  .btn.pri{border-color:#3a424d;background:#1b2027}
+  #msg{font-size:11.5px;color:var(--dim);margin-left:auto;text-align:right;max-width:46%;line-height:1.35}
+
+  /* ---------- nút ghi âm nổi ---------- */
+  #rec{
+    position:fixed;left:50%;transform:translateX(-50%);
+    bottom:calc(env(safe-area-inset-bottom) + 26px);
+    width:96px;height:96px;border-radius:50%;border:none;padding:0;z-index:20;
+    background:var(--red);display:grid;place-items:center;
+    box-shadow:0 10px 28px rgba(0,0,0,.55), 0 0 0 8px rgba(229,72,77,.10);
+    transition:background .2s, box-shadow .2s;
+  }
+  #rec:active{transform:translateX(-50%) scale(.94)}
+  #rec.on{background:#242a31;box-shadow:0 10px 28px rgba(0,0,0,.55), 0 0 0 12px rgba(229,72,77,.16)}
+  #rec .shape{
+    width:34px;height:34px;border-radius:9px;background:#fff;transition:all .22s;
+    position:absolute;
+  }
+  #rec.on .shape{width:24px;height:24px;border-radius:50%;background:var(--red)}
+  #rec .ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg);pointer-events:none}
+  #rec .ring circle{fill:none;stroke-width:3.5}
+  #rec .ring .bg{stroke:rgba(255,255,255,.14)}
+  #rec .ring .fg{stroke:#fff;stroke-linecap:round;stroke-dasharray:289;stroke-dashoffset:289;transition:stroke-dashoffset .3s linear}
+  #rec.on .ring .fg{stroke:var(--red)}
+
+  /* ---------- sheet ---------- */
+  .sheet{
+    position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.62);
+    display:none;align-items:flex-end;justify-content:center;
+  }
+  .sheet.on{display:flex}
+  .sheet .box{
+    width:100%;max-width:520px;background:var(--panel);border-top-left-radius:16px;
+    border-top-right-radius:16px;border:1px solid var(--line);border-bottom:none;
+    padding:18px 16px calc(env(safe-area-inset-bottom) + 18px);
+  }
+  .sheet h3{margin:0 0 12px;font-size:15px;font-weight:600}
+  .sheet input{
+    width:100%;background:#0e1116;border:1px solid var(--line);color:var(--txt);
+    border-radius:10px;padding:11px 12px;font-size:14px;font-family:inherit;margin-bottom:9px;
+  }
+  .sheet .row{display:flex;gap:8px;margin-top:6px}
+  .sheet .row .btn{flex:1;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <span id="clock">00:00</span>
+  <span id="queue"></span>
+  <span id="gas">…</span>
+  <button id="toggleZh" class="on">中文</button>
+</header>
+
+<main id="list"></main>
+<main id="final"></main>
+
+<footer>
+  <button class="btn pri" id="btnFinal" disabled>Bản chuẩn</button>
+  <button class="btn" id="btnSummary" hidden>Tóm tắt</button>
+  <button class="btn" id="btnSave" disabled>Lưu</button>
+  <span id="msg"></span>
+</footer>
+
+<button id="rec" aria-label="ghi âm">
+  <svg class="ring" viewBox="0 0 100 100" aria-hidden="true">
+    <circle class="bg" cx="50" cy="50" r="46"></circle>
+    <circle class="fg" id="ringFg" cx="50" cy="50" r="46"></circle>
+  </svg>
+  <span class="shape"></span>
+</button>
+
+<div class="sheet" id="setup">
+  <div class="box">
+    <h3>Kết nối server</h3>
+    <input id="inGas" placeholder="URL /exec của Apps Script" autocomplete="off" spellcheck="false" />
+    <input id="inToken" placeholder="Token" autocomplete="off" spellcheck="false" />
+    <div class="row">
+      <button class="btn" id="btnSetupNode">Dùng máy này</button>
+      <button class="btn pri" id="btnSetupSave">Lưu</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="spkSheet">
+  <div class="box">
+    <h3 id="spkTitle">Người nói</h3>
+    <input id="inName" placeholder="Tên" autocomplete="off" spellcheck="false" />
+    <div class="row">
+      <button class="btn" id="btnSpkCancel">Đóng</button>
+      <button class="btn pri" id="btnSpkSave">Lưu tên</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
