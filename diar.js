@@ -139,7 +139,8 @@
     function loadProfiles(list) {
       for (const p of list || []) {
         const arr = Array.from(p.centroid || []);
-        if (!arr.length) continue;
+        // embedding thật là 512 chiều; bỏ profile rác/khác phiên bản model
+        if (arr.length < 128) continue;
         if (centroids.some((x) => x.id === p.id)) continue;
         if (centroids.length && arr.length !== centroids[0].centroid.length) continue;
         centroids.push({
