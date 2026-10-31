@@ -46,6 +46,8 @@ let finalText = '';
 let summaryText = '';
 let recordedSec = 0;
 let startIso = '';
+let sessionSeq = 0;   // tăng mỗi phiên → vô hiệu job của phiên cũ
+let dirty = false;   // có nội dung chưa lưu
 
 /* ---------- utils ---------- */
 const pad = (n) => String(n).padStart(2, '0');
@@ -180,11 +182,62 @@ function setRing(p) {
   ringFg.style.strokeDashoffset = String(RING_LEN * (1 - Math.max(0, Math.min(1, p))));
 }
 
+/** Chụp dữ liệu phiên hiện tại thành payload gửi Telegram (không đọc lại state sau reset). */
+function snapshot() {
+  const rows = items.map((i) => ({ t: i.t, spk: i.spk, spkName: i.spkName, zh: i.zh, vi: i.vi }));
+  const transcript = rows.map((r) => `[${r.t}] ${r.spkName || r.spk || ''}: ${r.vi}`).join('\n');
+  const summary = summaryText.trim();
+  const md = summary
+    ? `# Biên bản họp — ${stamp()}\n\n${summary}\n`
+    : `# Biên bản họp — ${stamp()}\n\n${transcript}\n`;
+  return {
+    md, transcript, summaryText: summary, lines: rows,
+    duration: recordedSec, speakerCount: diar.speakerCount,
+    summary: summary ? 1 : 0, startedAt: startIso,
+    device: navigator.userAgent.slice(0, 60),
+  };
+}
+
+/** Gửi bản cũ lên Telegram trước khi xoá — chạy nền, không chặn ghi âm. */
+function flushToTelegram() {
+  if (!items.length) return;
+  const payload = snapshot();
+  gasPost('save', payload, { timeout: 60000 }).catch(() => {});
+}
+
+/** Bắt đầu phiên mới: xoá sạch hiển thị. Không đụng tới diar (tên người nói phải sống qua phiên). */
+function resetSession() {
+  sessionSeq++;
+  items = [];
+  finalText = '';
+  summaryText = '';
+  recordedSec = 0;
+  startIso = '';
+  dirty = false;
+
+  listEl.innerHTML = '';
+  listEl.style.display = '';
+  listEl.scrollTop = 0;
+  finalEl.classList.remove('on');
+  finalEl.textContent = '';
+
+  clockEl.textContent = '00:00:00';
+  queueEl.textContent = '';
+  setRing(0);
+
+  btnFinal.disabled = true;
+  btnSave.disabled = true;
+  btnSummary.hidden = true;
+  btnSummary.disabled = false;
+  btnSummary.textContent = 'Tóm tắt';
+  msg('');
+}
+
 /** Một câu đã chốt (VAD) → vào hàng đợi. */
 function enqueueSegment(pcm) {
   if (!pcm || pcm.length < TARGET_SR * 0.4) return;
   if (Diar.rmsDb(pcm) < -55) return; // bỏ đoạn im lặng
-  queue.push({ pcm, t: clockNow() });
+  queue.push({ pcm, t: clockNow(), sid: sessionSeq });
   queueEl.textContent = queue.length ? `${queue.length} chờ` : '';
   pump();
 }
@@ -205,6 +258,8 @@ async function pump() {
   busy = true;
   setDot(recording ? 'live' : 'busy');
   const job = queue[0];
+  // job của phiên đã bị xoá → bỏ, không gọi mạng
+  if (job.sid !== sessionSeq) { queue.shift(); busy = false; setDot(recording ? 'live' : ''); pump(); return; }
 
   const ui = makeItem(job.t, { id: '?', name: '?' });
 
@@ -257,8 +312,11 @@ async function pump() {
       ui.chip.className = 'spk ' + SPK_CLASS(spk.id) + (spk.low ? ' low' : '');
     }
 
+    if (job.sid !== sessionSeq) { ui.el.remove(); queue.shift(); busy = false; setDot(recording ? 'live' : ''); pump(); return; }
+
     const it = { t: job.t, zh, vi, zone: spk.id === '?' ? null : spk.id, spk: spk.id, spkName: spk.name };
     items.push(it);
+    dirty = true;
     btnFinal.disabled = false;
     btnSave.disabled = false;
     btnSummary.hidden = recording || !items.length;
@@ -295,6 +353,10 @@ async function startRec() {
   } catch (e) {
     return msg('Không mở được micro: ' + e.message, 6000);
   }
+
+  // phiên trước còn nội dung chưa lưu → gửi Telegram rồi mới xoá
+  if (dirty) flushToTelegram();
+  resetSession();
 
   // tải model giọng song song, không chặn ghi âm
   if (DIAR_ON && !embReady && !embLoading) {
@@ -445,29 +507,11 @@ async function buildSummary() {
 }
 
 async function saveAll() {
-  const body = summaryText.trim() ? summaryText.trim() : finalText.trim();
-  const md = body
-    ? `# Biên bản họp — ${stamp()}\n\n${body}\n`
-    : `# Biên bản họp — ${stamp()}\n\n${items.map((i) => `**[${i.t}] ${i.spkName || ''}** ${i.vi}`).join('\n\n')}\n`;
-
-  // transcript đầy đủ dạng text nhẹ
-  const txt =
-    `# ${stamp()}\n\n` +
-    items.map((i) => `[${i.t}] ${i.spkName || i.spk || ''}: ${i.vi}`).join('\n') +
-    (summaryText.trim() ? `\n\n--- TÓM TẮT ---\n\n${summaryText.trim()}\n` : '');
-
+  if (!items.length) return;
   try {
-    const r = await gasPost('save', {
-      md,
-      txt,
-      lines: items.map((i) => ({ t: i.t, spk: i.spk, spkName: i.spkName, zh: i.zh, vi: i.vi })),
-      duration: recordedSec,
-      speakerCount: diar.speakerCount,
-      summary: summaryText.trim() ? 1 : 0,
-      startedAt: startIso,
-      device: navigator.userAgent.slice(0, 60),
-    }, { timeout: 60000 });
-    msg('Đã lưu: ' + (r.mdUrl ? 'Drive' : 'ok'), 8000);
+    const r = await gasPost('save', snapshot(), { timeout: 60000 });
+    msg('Đã lưu: ' + (r.files ? r.files + ' file Telegram' : r.mdUrl ? 'Drive' : 'ok'), 8000);
+    dirty = false;
     btnSave.disabled = true;
   } catch (e) {
     msg('Lỗi lưu: ' + e.message, 6000);
