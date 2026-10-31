@@ -3,17 +3,20 @@
  * Transport: net.js (GAS /exec hoặc server.js /exec).
  * Tách người nói: embed.js (WavLM) + diar.js (clustering).
  */
-import { gasPost, needSetup, setConfig, getConfig } from './net.js';
+import { gasPost, gasStream, apiInfo } from './net.js';
 import './diar.js';
+import './vad.js';
 import { loadEmbedder, embed } from './embed.js';
 
 const Diar = globalThis.Diar;
+const Vad = globalThis.Vad;
 const QS = new URLSearchParams(location.search);
-let CHUNK_SEC = Math.min(60, Math.max(4, Number(QS.get('chunk')) || 10));
-const MIN_TAIL_SEC = 2;
+const CHUNK_MAX_MS = Math.min(8000, Math.max(3000, Number(QS.get('maxchunk')) || 5000));
 const TARGET_SR = 16000;
 const RING_LEN = 289; // 2πr, r=46
 const DIAR_ON = QS.get('diar') !== '0';
+
+const vad = Vad.create({ maxMs: CHUNK_MAX_MS });
 
 const $ = (id) => document.getElementById(id);
 const listEl = $('list');
@@ -36,7 +39,6 @@ let embLoading = false;
 
 let ctx = null, mic = null, src = null, proc = null, sink = null;
 let sampleRate = 48000;
-let blocks = [], blockLen = 0;
 let recording = false, startedAt = 0, tick = null, wakeLock = null;
 let queue = [], busy = false;
 let items = [];
@@ -178,20 +180,10 @@ function setRing(p) {
   ringFg.style.strokeDashoffset = String(RING_LEN * (1 - Math.max(0, Math.min(1, p))));
 }
 
-function flushChunk(force = false) {
-  if (!sampleRate || !blockLen) return;
-  if (!force && blockLen < sampleRate * CHUNK_SEC) return;
-  if (blockLen < sampleRate * MIN_TAIL_SEC) { blocks = []; blockLen = 0; setRing(0); return; }
-
-  const all = new Float32Array(blockLen);
-  let o = 0;
-  for (const b of blocks) { all.set(b, o); o += b.length; }
-  blocks = []; blockLen = 0;
-  setRing(0);
-
-  const pcm = resample(all, sampleRate, TARGET_SR);
-  if (Diar.rmsDb(pcm) < -55) return; // bỏ chunk im lặng
-
+/** Một câu đã chốt (VAD) → vào hàng đợi. */
+function enqueueSegment(pcm) {
+  if (!pcm || pcm.length < TARGET_SR * 0.4) return;
+  if (Diar.rmsDb(pcm) < -55) return; // bỏ đoạn im lặng
   queue.push({ pcm, t: clockNow() });
   queueEl.textContent = queue.length ? `${queue.length} chờ` : '';
   pump();
@@ -216,21 +208,47 @@ async function pump() {
 
   const ui = makeItem(job.t, { id: '?', name: '?' });
 
+  let zh = '';
+  let viAcc = '';
+  let streamErr = null;
+  let asrMs = 0;
+  let totalMs = 0;
+
   try {
     const hint = b64utf8(items.slice(-2).map((i) => i.zh).join(' ').slice(0, 300));
     const ctxStr = items.slice(-3).map((i) => `${i.zh}\n→ ${i.vi}`).join('\n');
     const b64 = b64of(encodeWavBytes(job.pcm, TARGET_SR));
 
-    const r = await gasPost('chunk', { b64, hint, ctx: ctxStr, speaker: null }, { timeout: 90000 });
-    const zh = String(r.zh || '').trim();
-    if (!zh) { ui.el.remove(); throw Object.assign(new Error(''), { silent: true }); }
+    // SSE: chữ Trung về trước (~0.5s sau khi chốt câu), bản dịch chạy dần sau đó
+    await gasStream(
+      { b64, hint, ctx: ctxStr, speaker: null },
+      (ev) => {
+        if (ev.e) { streamErr = ev.e; return; }
+        if (ev.zh !== undefined) {
+          zh = String(ev.zh || '');
+          if (zh) ui.zh.textContent = zh;
+          asrMs = ev.asrMs || 0;
+          if (ev.ms) totalMs = ev.ms;
+        }
+        if (ev.reset) { viAcc = ''; ui.vi.textContent = ''; }
+        if (ev.d) {
+          viAcc += ev.d;
+          ui.vi.textContent = viAcc;
+          ui.vi.classList.remove('live');
+          listEl.scrollTop = listEl.scrollHeight;
+        }
+      },
+      { timeout: 90000 }
+    );
 
-    ui.zh.textContent = zh;
-    const vi = String(r.vi || '').trim();
+    if (!zh) { ui.el.remove(); throw Object.assign(new Error(''), { silent: true }); }
+    if (streamErr && !viAcc) throw new Error(streamErr);
+
     ui.vi.classList.remove('live');
+    const vi = viAcc.trim();
     ui.vi.textContent = vi;
 
-    // Chỉ chạy tách người nói khi transcript đủ dài — chunk cụt vài chữ làm bẩn centroid,
+    // Chỉ chạy tách người nói khi transcript đủ dài — câu cụt vài chữ làm bẩn centroid,
     // sinh ra cụm rác (V3, V4…) cho cùng một người.
     let spk = { id: '?', name: '?' };
     if (zh.length >= 8) {
@@ -244,7 +262,7 @@ async function pump() {
     btnFinal.disabled = false;
     btnSave.disabled = false;
     btnSummary.hidden = recording || !items.length;
-    updateGasFromLatency(r.asrMs, r.trMs, r.ms);
+    updateGasFromLatency(asrMs, 0, totalMs || asrMs);
   } catch (e) {
     if (!e.silent) {
       ui.el.remove();
@@ -270,8 +288,6 @@ function updateGasFromLatency(asrMs, trMs, totalMs) {
 }
 
 async function startRec() {
-  if (needSetup()) { $('setup').classList.add('on'); return; }
-
   try {
     mic = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -304,12 +320,10 @@ async function startRec() {
   proc.connect(sink);
   sink.connect(ctx.destination);
 
-  blocks = []; blockLen = 0;
   proc.onaudioprocess = (e) => {
-    const d = e.inputBuffer.getChannelData(0);
-    blocks.push(new Float32Array(d));
-    blockLen += d.length;
-    if (blockLen >= sampleRate * CHUNK_SEC) flushChunk();
+    const raw = new Float32Array(e.inputBuffer.getChannelData(0));
+    const d = sampleRate === TARGET_SR ? raw : resample(raw, sampleRate, TARGET_SR);
+    for (const seg of vad.push(d)) enqueueSegment(seg);
   };
 
   recording = true;
@@ -322,7 +336,7 @@ async function startRec() {
   setRing(0);
   tick = setInterval(() => {
     clockEl.textContent = hhmmss(Date.now() - startedAt);
-    if (sampleRate) setRing(blockLen / (sampleRate * CHUNK_SEC));
+    setRing(vad.pendingMs / CHUNK_MAX_MS);
   }, 250);
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
@@ -332,7 +346,7 @@ async function stopRec() {
   recordedSec = Math.round((Date.now() - startedAt) / 1000);
   recBtn.classList.remove('on');
   if (tick) { clearInterval(tick); tick = null; }
-  flushChunk(true);
+  for (const seg of vad.flush()) enqueueSegment(seg);
   try { proc && (proc.onaudioprocess = null); } catch {}
   try { src && src.disconnect(); proc && proc.disconnect(); sink && sink.disconnect(); } catch {}
   try { mic && mic.getTracks().forEach((t) => t.stop()); } catch {}
@@ -473,26 +487,12 @@ toggleZh.addEventListener('click', () => {
   toggleZh.classList.toggle('on', !document.body.classList.contains('vi-only'));
 });
 
-/* setup */
-$('btnSetupSave').addEventListener('click', async () => {
-  const url = $('inGas').value.trim();
-  const tok = $('inToken').value.trim();
-  if (!url) return msg('Cần URL /exec', 4000);
-  setConfig(url, tok);
-  $('setup').classList.remove('on');
-  checkHealth();
-});
-$('btnSetupNode').addEventListener('click', () => {
-  setConfig('', '');
-  localStorage.removeItem('lr.gas');
-  location.search = '?backend=node';
-});
-
 async function checkHealth() {
   try {
     const t0 = Date.now();
     const h = await gasPost('health', {}, { timeout: 30000 });
-    setGas(h.wbOk ? 'ok' : 'err', h.backend === 'node' ? 'máy' : 'gas');
+    const info = apiInfo();
+    setGas(h.wbOk ? 'ok' : 'err', info.isLocal ? 'máy' : info.isWorker ? 'worker' : 'gas');
     if (!h.asrReady) msg('Server chưa có key nhận dạng giọng', 7000);
     else if (!h.wbOk) msg('Server chưa có key dịch', 7000);
     return Date.now() - t0;
@@ -504,14 +504,6 @@ async function checkHealth() {
 
 /* boot */
 (async () => {
-  if (needSetup()) {
-    $('setup').classList.add('on');
-    setGas('', 'chưa nối');
-    return;
-  }
-  const { gasUrl } = getConfig();
-  if (gasUrl) { $('inGas').value = gasUrl; $('inToken').value = localStorage.getItem('lr.token') || ''; }
-
   checkHealth();
   setInterval(() => { if (recording) checkHealth(); }, 60000);
 
