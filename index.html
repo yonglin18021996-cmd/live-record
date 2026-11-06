@@ -50,6 +50,13 @@
     border-radius:8px;padding:5px 9px;font-size:12px;font-family:inherit;
   }
   #toggleZh.on{color:var(--txt);border-color:#3a424d}
+  #mdot{cursor:pointer}
+  #mdot.ok{background:var(--ok)}
+  #mdot.err{background:var(--red)}
+  #model{
+    background:var(--panel);border:1px solid var(--line);color:var(--txt);
+    border-radius:8px;padding:5px 2px;font-size:12px;font-family:inherit;max-width:120px;
+  }
 
   /* ---------- list ---------- */
   #list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 0 190px}
@@ -139,6 +146,8 @@
   <span id="clock">00:00</span>
   <span id="queue"></span>
   <span id="gas">…</span>
+  <span class="dot" id="mdot" title="trạng thái model"></span>
+  <select id="model" aria-label="model dịch"></select>
   <button id="toggleZh" class="on">原文</button>
 </header>
 
@@ -146,9 +155,7 @@
 <main id="final"></main>
 
 <footer>
-  <button class="btn pri" id="btnFinal" disabled>Bản chuẩn</button>
   <button class="btn" id="btnSummary" hidden>Tóm tắt</button>
-  <button class="btn" id="btnSave" disabled>Lưu</button>
   <span id="msg"></span>
 </footer>
 

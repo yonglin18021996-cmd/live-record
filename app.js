@@ -28,10 +28,22 @@ const msgEl = $('msg');
 const gasEl = $('gas');
 const recBtn = $('rec');
 const ringFg = $('ringFg');
-const btnFinal = $('btnFinal');
 const btnSummary = $('btnSummary');
-const btnSave = $('btnSave');
 const toggleZh = $('toggleZh');
+const modelSel = $('model');
+const mdotEl = $('mdot');
+
+/* Danh mục model dự phòng nếu server không trả (bình thường list lấy từ server mỗi lần load) */
+const MODELS = [
+  { id: 'glm-5.3-flashx', label: 'GLM 5.3 FlashX' },
+  { id: 'glm-5.3-flash', label: 'GLM 5.3 Flash' },
+  { id: 'deepseek-v4.1-flash', label: 'DS v4.1 Flash' },
+  { id: 'minimax-m3.1-flash', label: 'MiniMax M3.1' },
+  { id: 'space-bunny', label: 'Space Bunny' },
+];
+let MODEL_LABEL = Object.fromEntries(MODELS.map((m) => [m.id, m.label]));
+let modelHealth = {}; // id -> {ok, ms, err} — từ action model.health
+let chainArr = ['glm-5.3-flashx', 'deepseek-v4.1-flash', 'minimax-m3.1-flash']; // thứ tự fallback, server trả về khi boot
 
 const diar = Diar.create();
 let embReady = false;
@@ -42,7 +54,6 @@ let sampleRate = 48000;
 let recording = false, startedAt = 0, tick = null, wakeLock = null;
 let queue = [], busy = false;
 let items = [];
-let finalText = '';
 let summaryText = '';
 let recordedSec = 0;
 let startIso = '';
@@ -72,6 +83,75 @@ function setGas(state, label) {
   gasEl.className = state || '';
   gasEl.textContent = label || '…';
 }
+
+/* ---------- chọn model + báo health ---------- */
+/** Danh mục model REFRESH mỗi lần load: lấy từ server (action health), không hardcode. */
+async function initModelSelect() {
+  let h = null;
+  try { h = await gasPost('health', {}, { timeout: 15000 }); } catch {}
+  const list = h && h.models && Object.keys(h.models).length
+    ? Object.keys(h.models).map((id) => ({ id, label: String(h.models[id] || id) }))
+    : MODELS;
+  if (h && Array.isArray(h.chain) && h.chain.length) chainArr = h.chain;
+  MODEL_LABEL = Object.fromEntries(list.map((m) => [m.id, m.label]));
+
+  modelSel.innerHTML = '';
+  for (const m of list) {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label;
+    modelSel.appendChild(o);
+  }
+  const saved = localStorage.getItem('lr.model');
+  const def = (h && h.default) || list[0].id;
+  modelSel.value = list.some((m) => m.id === saved) ? saved : def;
+  localStorage.setItem('lr.model', modelSel.value);
+}
+const modelOf = () => modelSel.value;
+
+function updateModelDot() {
+  const s = modelHealth[modelOf()];
+  mdotEl.className = 'dot' + (s ? (s.ok ? ' ok' : ' err') : '');
+  const parts = [...modelSel.options].map((o) => {
+    const st = modelHealth[o.value];
+    return `${o.textContent}: ${st ? (st.ok ? 'ok ' + Math.round(st.ms) + 'ms' : 'LỖI') : '?'}`;
+  });
+  mdotEl.title = parts.join('\n');
+}
+
+async function probeModels() {
+  try {
+    const h = await gasPost('model.health', {}, { timeout: 45000 });
+    modelHealth = h.models || {};
+    if (Array.isArray(h.chain) && h.chain.length) chainArr = h.chain;
+    updateModelDot();
+    return h;
+  } catch {
+    return null;
+  }
+}
+
+/** Model đang chọn chết → tự chuyển sang model kế trong chuỗi fallback còn sống. */
+async function failoverModel() {
+  await probeModels();
+  const cur = modelOf();
+  if (modelHealth[cur] && modelHealth[cur].ok) return false;
+  const alive = Object.keys(modelHealth).filter((k) => modelHealth[k].ok);
+  if (!alive.length) { msg('Tất cả model dịch đều lỗi — kiểm tra mạng/gateway', 8000); return false; }
+  const next = chainArr.find((k) => alive.includes(k)) || alive[0];
+  modelSel.value = next;
+  localStorage.setItem('lr.model', next);
+  updateModelDot();
+  msg(`Model ${MODEL_LABEL[cur] || cur} lỗi — đã chuyển sang ${MODEL_LABEL[next] || next}`, 9000);
+  return true;
+}
+
+modelSel.addEventListener('change', () => {
+  localStorage.setItem('lr.model', modelSel.value);
+  updateModelDot();
+  if (!modelHealth[modelSel.value]) probeModels();
+});
+mdotEl.addEventListener('click', () => probeModels());
 
 function resample(input, from, to) {
   if (from === to) return input;
@@ -182,18 +262,17 @@ function setRing(p) {
   ringFg.style.strokeDashoffset = String(RING_LEN * (1 - Math.max(0, Math.min(1, p))));
 }
 
-/** Chụp dữ liệu phiên hiện tại thành payload gửi Telegram (không đọc lại state sau reset). */
+/** Chụp dữ liệu phiên hiện tại thành payload gửi Telegram: bản gốc nguyên văn + tóm tắt. */
 function snapshot() {
   const rows = items.map((i) => ({ t: i.t, spk: i.spk, spkName: i.spkName, zh: i.zh, vi: i.vi }));
-  const transcript = rows.map((r) => `[${r.t}] ${r.spkName || r.spk || ''}: ${r.vi}`).join('\n');
-  const summary = summaryText.trim();
-  const md = summary
-    ? `# Biên bản họp — ${stamp()}\n\n${summary}\n`
-    : `# Biên bản họp — ${stamp()}\n\n${transcript}\n`;
+  const transcript = rows
+    .filter((r) => (r.zh || '').trim())
+    .map((r) => `[${r.t}] ${r.spkName || r.spk || ''}: ${r.zh}`)
+    .join('\n'); // CHỈ văn bản gốc (Trung/Anh) — không kèm bản dịch
   return {
-    md, transcript, summaryText: summary, lines: rows,
+    transcript, summaryText: summaryText.trim(), lines: rows,
     duration: recordedSec, speakerCount: diar.speakerCount,
-    summary: summary ? 1 : 0, startedAt: startIso,
+    summary: summaryText.trim() ? 1 : 0, startedAt: startIso,
     device: navigator.userAgent.slice(0, 60),
   };
 }
@@ -209,7 +288,6 @@ function flushToTelegram() {
 function resetSession() {
   sessionSeq++;
   items = [];
-  finalText = '';
   summaryText = '';
   recordedSec = 0;
   startIso = '';
@@ -225,8 +303,6 @@ function resetSession() {
   queueEl.textContent = '';
   setRing(0);
 
-  btnFinal.disabled = true;
-  btnSave.disabled = true;
   btnSummary.hidden = true;
   btnSummary.disabled = false;
   btnSummary.textContent = 'Tóm tắt';
@@ -266,8 +342,10 @@ async function pump() {
   let zh = '';
   let viAcc = '';
   let streamErr = null;
+  let streamCode = '';
   let asrMs = 0;
   let totalMs = 0;
+  let requeue = false;
 
   try {
     const hint = b64utf8(items.slice(-2).map((i) => i.zh).join(' ').slice(0, 300));
@@ -276,9 +354,9 @@ async function pump() {
 
     // SSE: chữ Trung về trước (~0.5s sau khi chốt câu), bản dịch chạy dần sau đó
     await gasStream(
-      { b64, hint, ctx: ctxStr, speaker: null },
+      { b64, hint, ctx: ctxStr, speaker: null, model: modelOf() },
       (ev) => {
-        if (ev.e) { streamErr = ev.e; return; }
+        if (ev.e) { streamErr = ev.e; streamCode = ev.code || 'INTERNAL'; return; }
         if (ev.zh !== undefined) {
           zh = String(ev.zh || '');
           if (zh) ui.zh.textContent = zh;
@@ -297,7 +375,7 @@ async function pump() {
     );
 
     if (!zh) { ui.el.remove(); throw Object.assign(new Error(''), { silent: true }); }
-    if (streamErr && !viAcc) throw new Error(streamErr);
+    if (streamErr && !viAcc) throw Object.assign(new Error(streamErr), { code: streamCode });
 
     ui.vi.classList.remove('live');
     const vi = viAcc.trim();
@@ -317,8 +395,6 @@ async function pump() {
     const it = { t: job.t, zh, vi, zone: spk.id === '?' ? null : spk.id, spk: spk.id, spkName: spk.name };
     items.push(it);
     dirty = true;
-    btnFinal.disabled = false;
-    btnSave.disabled = false;
     btnSummary.hidden = recording || !items.length;
     updateGasFromLatency(asrMs, 0, totalMs || asrMs);
   } catch (e) {
@@ -328,10 +404,19 @@ async function pump() {
       if (e.code === 'WB_BLOCKED_IP') { setGas('err', 'chặn'); msg(e.message, 9000); }
       else if (e.code === 'AUTH') { setGas('err', 'token'); msg(e.message, 9000); }
       else msg(e.message || 'lỗi', 5000);
+      // lỗi có thể do model/gateway sập → probe health; model chết thì tự chuyển + thử lại đoạn này 1 lần
+      if (e.code !== 'AUTH' && e.code !== 'WB_BLOCKED_IP' && e.code !== 'TIMEOUT') {
+        requeue = await failoverModel();
+      }
     }
   }
 
   queue.shift();
+  if (requeue && !job.retried) {
+    job.retried = true;
+    queue.unshift(job);
+    queueEl.textContent = queue.length ? `${queue.length} chờ` : '';
+  }
   busy = false;
   queueEl.textContent = queue.length ? `${queue.length} chờ` : '';
   setDot(recording ? 'live' : '');
@@ -419,14 +504,16 @@ async function stopRec() {
   setDot(busy ? 'busy' : '');
   setRing(0);
 
-  // đợi hàng đợi xử lý xong rồi mới hiện Tóm tắt
-  const wait = setInterval(() => {
-    if (!busy && !queue.length) {
-      clearInterval(wait);
-      btnSummary.hidden = !items.length;
-    }
-  }, 500);
-  setTimeout(() => { clearInterval(wait); btnSummary.hidden = !items.length; }, 120000);
+  // đợi hàng đợi xử lý xong rồi TỰ LƯU: gửi bản gốc ngay + tóm tắt tự chạy tự gửi Telegram
+  let autoSaved = false;
+  const tryAutoSave = () => {
+    if (autoSaved || busy || queue.length) return;
+    autoSaved = true;
+    btnSummary.hidden = !items.length;
+    if (items.length) autoSave();
+  };
+  const wait = setInterval(tryAutoSave, 500);
+  setTimeout(() => { clearInterval(wait); tryAutoSave(); }, 120000);
 
   syncSpeakers();
 }
@@ -438,7 +525,7 @@ async function syncSpeakers() {
   } catch {}
 }
 
-/* ---------- bản chuẩn ---------- */
+/* ---------- panel xem full ---------- */
 function showPanel(text) {
   finalEl.classList.add('on');
   listEl.style.display = 'none';
@@ -446,28 +533,7 @@ function showPanel(text) {
   finalEl.scrollTop = finalEl.scrollHeight;
 }
 
-async function buildFinal() {
-  if (!items.length) return;
-  showPanel('');
-  btnFinal.disabled = true;
-  finalText = '';
-  try {
-    const r = await gasPost('final', { items: items.map((i) => ({ zh: i.zh })) }, { timeout: 180000 });
-    finalText = r.text || '';
-    showPanel(finalText);
-    // tự học tên riêng cho các buổi sau (không chặn UI)
-    if (finalText.length > 40) {
-      gasPost('names.extract', { text: finalText }, { timeout: 60000 }).catch(() => {});
-    }
-  } catch (e) {
-    msg('Lỗi bản chuẩn: ' + e.message, 6000);
-    listEl.style.display = '';
-    finalEl.classList.remove('on');
-  }
-  btnFinal.disabled = false;
-}
-
-/* ---------- tóm tắt (map-reduce, có resume) ---------- */
+/* ---------- tóm tắt (map-reduce, có resume) + tự gửi Telegram ---------- */
 async function buildSummary() {
   if (!items.length) return;
   const passed = items.filter((i) => i.vi).map((i) => ({ vi: i.vi, t: i.t, spk: i.spkName || i.spk }));
@@ -478,7 +544,7 @@ async function buildSummary() {
   showPanel('Đang tóm tắt…');
 
   try {
-    const start = await gasPost('summaryStart', { items: passed, sessionId: 'S' + Date.now() }, { timeout: 60000 });
+    const start = await gasPost('summaryStart', { items: passed, sessionId: 'S' + Date.now(), model: modelOf() }, { timeout: 60000 });
     const jobId = start.jobId;
     const total = start.blocks || 1;
     let step = null;
@@ -494,7 +560,14 @@ async function buildSummary() {
       summaryText = step.text || '';
       showPanel(summaryText);
       btnSummary.textContent = 'Xem tóm tắt';
-      btnSave.disabled = false;
+      dirty = false;
+      // tự gửi file tóm tắt vào Telegram
+      await gasPost('save', { summaryText, sessionId: 'hop-' + stamp() }, { timeout: 60000 });
+      msg('Đã gửi tóm tắt vào Telegram', 8000);
+      // học tên riêng cho các buổi sau (không chặn UI)
+      if (summaryText.length > 40) {
+        gasPost('names.extract', { text: summaryText, model: modelOf() }, { timeout: 60000 }).catch(() => {});
+      }
     } else {
       showPanel('Tóm tắt chưa xong — bấm lại để chạy tiếp.');
       btnSummary.textContent = 'Tóm tắt';
@@ -502,30 +575,30 @@ async function buildSummary() {
   } catch (e) {
     showPanel('Lỗi tóm tắt: ' + e.message);
     btnSummary.textContent = 'Tóm tắt';
+    msg('Chưa gửi được tóm tắt — bấm nút Tóm tắt để thử lại', 8000);
   }
   btnSummary.disabled = false;
 }
 
-async function saveAll() {
-  if (!items.length) return;
+/** Tự lưu khi ngưng record: gửi bản gốc NGAY, rồi tự tóm tắt + gửi tiếp. */
+async function autoSave() {
+  // 1) file văn bản gốc (Trung/Anh) — gửi ngay, không chờ tóm tắt
   try {
-    const r = await gasPost('save', snapshot(), { timeout: 60000 });
-    msg('Đã lưu: ' + (r.files ? r.files + ' file Telegram' : r.mdUrl ? 'Drive' : 'ok'), 8000);
-    dirty = false;
-    btnSave.disabled = true;
+    await gasPost('save', snapshot(), { timeout: 60000 });
+    msg('Đã gửi bản gốc vào Telegram', 6000);
   } catch (e) {
-    msg('Lỗi lưu: ' + e.message, 6000);
+    msg('Lỗi gửi bản gốc: ' + e.message, 8000);
   }
+  // 2) tóm tắt 3 mục tự chạy rồi tự gửi (trong buildSummary)
+  await buildSummary();
 }
 
 /* ---------- events ---------- */
 recBtn.addEventListener('click', () => (recording ? stopRec() : startRec()));
-btnFinal.addEventListener('click', buildFinal);
 btnSummary.addEventListener('click', () => {
   if (summaryText.trim()) { showPanel(summaryText); return; }
   buildSummary();
 });
-btnSave.addEventListener('click', saveAll);
 toggleZh.addEventListener('click', () => {
   document.body.classList.toggle('vi-only');
   toggleZh.classList.toggle('on', !document.body.classList.contains('vi-only'));
@@ -548,6 +621,11 @@ async function checkHealth() {
 
 /* boot */
 (async () => {
+  // danh mục model REFRESH mỗi lần load từ server + probe health lần đầu
+  await initModelSelect();
+  probeModels();
+  setInterval(() => { if (!recording) probeModels(); }, 300000); // 5 phút/lần khi không ghi âm
+
   checkHealth();
   setInterval(() => { if (recording) checkHealth(); }, 60000);
 
