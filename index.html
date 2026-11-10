@@ -16,6 +16,7 @@
     --dim:#8b939e; --zh:#6f7783; --red:#e5484d; --ok:#2ea043; --warn:#d29922;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  :focus-visible{outline:2px solid var(--red);outline-offset:2px}
   html,body{height:100%;margin:0}
   body{
     background:var(--bg); color:var(--txt);
@@ -50,12 +51,15 @@
     border-radius:8px;padding:5px 9px;font-size:12px;font-family:inherit;
   }
   #toggleZh.on{color:var(--txt);border-color:#3a424d}
-  #mdot{cursor:pointer}
-  #mdot.ok{background:var(--ok)}
-  #mdot.err{background:var(--red)}
+  .dotbtn{
+    width:40px;height:40px;border:0;background:transparent;padding:0;border-radius:50%;
+    display:grid;place-items:center;flex:0 0 auto;cursor:pointer;
+  }
+  #mdotDot.ok{background:var(--ok)}
+  #mdotDot.err{background:var(--red)}
   #model{
-    background:var(--panel);border:1px solid var(--line);color:var(--txt);
-    border-radius:8px;padding:5px 2px;font-size:12px;font-family:inherit;max-width:120px;
+    width:100%;background:var(--panel);border:1px solid var(--line);color:var(--txt);
+    border-radius:10px;padding:9px 10px;font-size:14px;font-family:inherit;margin-bottom:9px;
   }
 
   /* ---------- list ---------- */
@@ -120,6 +124,16 @@
   #rec .ring .fg{stroke:#fff;stroke-linecap:round;stroke-dasharray:289;stroke-dashoffset:289;transition:stroke-dashoffset .3s linear}
   #rec.on .ring .fg{stroke:var(--red)}
 
+  /* ---------- nút về đáy ---------- */
+  #jump{
+    position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 62px);
+    width:44px;height:44px;border-radius:50%;z-index:19;display:none;place-items:center;
+    background:var(--panel);border:1px solid #3a424d;color:var(--txt);padding:0;
+    box-shadow:0 6px 18px rgba(0,0,0,.5);
+  }
+  #jump.on{display:grid}
+  #jump svg{width:18px;height:18px;display:block}
+
   /* ---------- sheet ---------- */
   .sheet{
     position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.62);
@@ -138,6 +152,10 @@
   }
   .sheet .row{display:flex;gap:8px;margin-top:6px}
   .sheet .row .btn{flex:1;text-align:center}
+  #modelSheet label{display:block;font-size:12px;color:var(--dim);margin:0 0 6px}
+  #mhint{font-size:12px;color:var(--dim);line-height:1.8;margin:0 0 10px}
+  #mhint b{color:var(--txt);font-weight:500}
+  #mhint .bad{color:#ff8a8a}
 </style>
 </head>
 <body>
@@ -146,13 +164,16 @@
   <span id="clock">00:00</span>
   <span id="queue"></span>
   <span id="gas">…</span>
-  <span class="dot" id="mdot" title="trạng thái model"></span>
-  <select id="model" aria-label="model dịch"></select>
+  <button id="mdot" class="dotbtn" aria-label="Model dịch" title="trạng thái model"><span class="dot" id="mdotDot"></span></button>
   <button id="toggleZh" class="on">原文</button>
 </header>
 
 <main id="list"></main>
 <main id="final"></main>
+
+<button id="jump" aria-label="về nội dung mới nhất">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+</button>
 
 <footer>
   <button class="btn" id="btnSummary" hidden>Tóm tắt</button>
@@ -167,6 +188,17 @@
   <span class="shape"></span>
 </button>
 
+
+<div class="sheet" id="modelSheet">
+  <div class="box">
+    <label for="model">Model dịch</label>
+    <select id="model" aria-label="model dịch"></select>
+    <div id="mhint"></div>
+    <div class="row">
+      <button class="btn" id="btnModelClose">Đóng</button>
+    </div>
+  </div>
+</div>
 
 <div class="sheet" id="spkSheet">
   <div class="box">

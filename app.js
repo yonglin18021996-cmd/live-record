@@ -32,6 +32,10 @@ const btnSummary = $('btnSummary');
 const toggleZh = $('toggleZh');
 const modelSel = $('model');
 const mdotEl = $('mdot');
+const mdotDot = $('mdotDot');
+const jumpEl = $('jump');
+const modelSheet = $('modelSheet');
+const mhintEl = $('mhint');
 
 /* Danh mục model dự phòng nếu server không trả (bình thường list lấy từ server mỗi lần load) */
 const MODELS = [
@@ -109,14 +113,23 @@ async function initModelSelect() {
 }
 const modelOf = () => modelSel.value;
 
+const esc = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
 function updateModelDot() {
   const s = modelHealth[modelOf()];
-  mdotEl.className = 'dot' + (s ? (s.ok ? ' ok' : ' err') : '');
-  const parts = [...modelSel.options].map((o) => {
+  mdotDot.className = 'dot' + (s ? (s.ok ? ' ok' : ' err') : '');
+  const rows = [...modelSel.options].map((o) => {
     const st = modelHealth[o.value];
-    return `${o.textContent}: ${st ? (st.ok ? 'ok ' + Math.round(st.ms) + 'ms' : 'LỖI') : '?'}`;
+    const right = st
+      ? st.ok
+        ? 'ok · ' + Math.round(st.ms) + 'ms'
+        : '<span class="bad">lỗi</span>'
+      : '?';
+    return { text: `${o.textContent}: ${st ? (st.ok ? 'ok ' + Math.round(st.ms) + 'ms' : 'LỖI') : '?'}`, html: `<div><b>${esc(o.textContent)}</b> · ${right}</div>` };
   });
-  mdotEl.title = parts.join('\n');
+  mdotEl.title = rows.map((r) => r.text).join('\n');
+  mhintEl.innerHTML = rows.map((r) => r.html).join('');
 }
 
 async function probeModels() {
@@ -151,7 +164,11 @@ modelSel.addEventListener('change', () => {
   updateModelDot();
   if (!modelHealth[modelSel.value]) probeModels();
 });
-mdotEl.addEventListener('click', () => probeModels());
+mdotEl.addEventListener('click', () => {
+  modelSheet.classList.add('on');
+  probeModels();
+});
+$('btnModelClose').addEventListener('click', () => modelSheet.classList.remove('on'));
 
 function resample(input, from, to) {
   if (from === to) return input;
@@ -207,6 +224,37 @@ function b64utf8(s) {
 /* ---------- render ---------- */
 const SPK_CLASS = (id) => (id && /^V[1-6]$/.test(id) ? 'v' + id.slice(1) : '');
 
+/* Bám đáy CÓ ĐIỀU KIỆN: người dùng kéo lên đọc nội dung cũ thì không bị kéo xuống nữa.
+ * Ngưỡng 72px đủ rộng để quán tính cuộn của iOS không tự bật lại. */
+const NEAR_BOTTOM_PX = 72;
+let stickBottom = true;
+let scrollRaf = 0;
+const nearBottom = () =>
+  listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < NEAR_BOTTOM_PX;
+function follow() {
+  if (stickBottom) listEl.scrollTop = listEl.scrollHeight;
+}
+function updateJump() {
+  jumpEl.classList.toggle('on', !stickBottom);
+}
+jumpEl.addEventListener('click', () => {
+  stickBottom = true;
+  listEl.scrollTop = listEl.scrollHeight;
+  updateJump();
+});
+listEl.addEventListener(
+  'scroll',
+  () => {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      stickBottom = nearBottom();
+      updateJump();
+    });
+  },
+  { passive: true }
+);
+
 function makeItem(time, spk) {
   const el = document.createElement('div');
   el.className = 'it';
@@ -214,7 +262,7 @@ function makeItem(time, spk) {
     `<div class="head"><span class="spk ${SPK_CLASS(spk.id)}">${spk.name || spk.id || '?'}</span>` +
     `<span class="tm">${time}</span></div><div class="zh"></div><div class="vi live"></div>`;
   listEl.appendChild(el);
-  listEl.scrollTop = listEl.scrollHeight;
+  follow();
   const chip = el.querySelector('.spk');
   chip.addEventListener('click', () => openSpeakerSheet(spk.id, chip));
   return { el, chip, zh: el.querySelector('.zh'), vi: el.querySelector('.vi') };
@@ -225,7 +273,7 @@ function renderError(time, text) {
   el.innerHTML = `<div class="tm">${time}</div><div class="err"></div>`;
   el.querySelector('.err').textContent = text;
   listEl.appendChild(el);
-  listEl.scrollTop = listEl.scrollHeight;
+  follow();
 }
 
 /* ---------- speaker sheet ---------- */
@@ -296,6 +344,8 @@ function resetSession() {
   listEl.innerHTML = '';
   listEl.style.display = '';
   listEl.scrollTop = 0;
+  stickBottom = true;
+  updateJump();
   finalEl.classList.remove('on');
   finalEl.textContent = '';
 
@@ -368,7 +418,7 @@ async function pump() {
           viAcc += ev.d;
           ui.vi.textContent = viAcc;
           ui.vi.classList.remove('live');
-          listEl.scrollTop = listEl.scrollHeight;
+          follow();
         }
       },
       { timeout: 90000 }
@@ -530,7 +580,7 @@ function showPanel(text) {
   finalEl.classList.add('on');
   listEl.style.display = 'none';
   finalEl.textContent = text;
-  finalEl.scrollTop = finalEl.scrollHeight;
+  finalEl.scrollTop = 0;
 }
 
 /* ---------- tóm tắt (map-reduce, có resume) + tự gửi Telegram ---------- */
